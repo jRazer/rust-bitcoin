@@ -55,6 +55,10 @@ pub trait ConsensusDecodable<D: SimpleDecoder>: Sized {
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Debug)]
 pub struct VarInt(pub u64);
 
+/// A variable-length unsigned integer which enforces minimal encoding
+#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Debug)]
+pub struct MinimalVarInt(pub u64);
+
 /// Data which must be preceded by a 4-byte checksum
 #[derive(PartialEq, Eq, Clone, Debug)]
 pub struct CheckedData(pub Vec<u8>);
@@ -123,6 +127,58 @@ impl<D: SimpleDecoder> ConsensusDecodable<D> for VarInt {
     }
 }
 
+impl MinimalVarInt {
+    /// Gets the length of this VarInt when encoded.
+    /// Returns 1 for 0...0xFC, 3 for 0xFD...(2^16-1), 5 for 0x10000...(2^32-1),
+    /// and 9 otherwise.
+    #[inline]
+    pub fn encoded_length(&self) -> usize {
+        VarInt(self.0).encoded_length() as usize
+    }
+}
+
+impl<S: SimpleEncoder> ConsensusEncodable<S> for MinimalVarInt {
+    #[inline]
+    fn consensus_encode(&self, s: &mut S) -> Result<(), serialize::Error> {
+        VarInt(self.0).consensus_encode(s)
+    }
+}
+
+impl<D: SimpleDecoder> ConsensusDecodable<D> for MinimalVarInt {
+    #[inline]
+    fn consensus_decode(d: &mut D) -> Result<MinimalVarInt, serialize::Error> {
+        let n = d.read_u8()?;
+        match n {
+            0xFF => {
+                let x = d.read_u64()?;
+                if x < 0x100000000 {
+                    Err(serialize::Error::ParseFailed("non-minimal varint"))
+                } else {
+                    Ok(MinimalVarInt(x))
+                }
+            }
+            0xFE => {
+                let x = d.read_u32()?;
+                if x < 0x10000 {
+                    Err(serialize::Error::ParseFailed("non-minimal varint"))
+                } else {
+                    Ok(MinimalVarInt(x as u64))
+                }
+            }
+            0xFD => {
+                let x = d.read_u16()?;
+                if x < 0xFD {
+                    Err(serialize::Error::ParseFailed("non-minimal varint"))
+                } else {
+                    Ok(MinimalVarInt(x as u64))
+                }
+            }
+            n => Ok(MinimalVarInt(n as u64))
+        }
+    }
+}
+
+
 // Booleans
 impl<S: SimpleEncoder> ConsensusEncodable<S> for bool {
     #[inline]
@@ -185,7 +241,7 @@ impl_array!(32);
 impl<S: SimpleEncoder, T: ConsensusEncodable<S>> ConsensusEncodable<S> for [T] {
     #[inline]
     fn consensus_encode(&self, s: &mut S) -> Result<(), serialize::Error> {
-        VarInt(self.len() as u64).consensus_encode(s)?;
+        MinimalVarInt(self.len() as u64).consensus_encode(s)?;
         for c in self.iter() { c.consensus_encode(s)?; }
         Ok(())
     }
@@ -202,7 +258,7 @@ impl<S: SimpleEncoder, T: ConsensusEncodable<S>> ConsensusEncodable<S> for Vec<T
 impl<D: SimpleDecoder, T: ConsensusDecodable<D>> ConsensusDecodable<D> for Vec<T> {
     #[inline]
     fn consensus_decode(d: &mut D) -> Result<Vec<T>, serialize::Error> {
-        let VarInt(len): VarInt = ConsensusDecodable::consensus_decode(d)?;
+        let len = MinimalVarInt::consensus_decode(d)?.0;
         let byte_size = (len as usize)
                             .checked_mul(mem::size_of::<T>())
                             .ok_or(serialize::Error::ParseFailed("Invalid length"))?;
@@ -223,7 +279,7 @@ impl<S: SimpleEncoder, T: ConsensusEncodable<S>> ConsensusEncodable<S> for Box<[
 impl<D: SimpleDecoder, T: ConsensusDecodable<D>> ConsensusDecodable<D> for Box<[T]> {
     #[inline]
     fn consensus_decode(d: &mut D) -> Result<Box<[T]>, serialize::Error> {
-        let VarInt(len): VarInt = ConsensusDecodable::consensus_decode(d)?;
+        let len = MinimalVarInt::consensus_decode(d)?.0;
         let len = len as usize;
         if len > MAX_VEC_SIZE {
             return Err(serialize::Error::OversizedVectorAllocation { requested: len, max: MAX_VEC_SIZE })
@@ -350,7 +406,7 @@ impl<S, K, V> ConsensusEncodable<S> for HashMap<K, V>
 {
     #[inline]
     fn consensus_encode(&self, s: &mut S) -> Result<(), serialize::Error> {
-        VarInt(self.len() as u64).consensus_encode(s)?;
+        MinimalVarInt(self.len() as u64).consensus_encode(s)?;
         for (key, value) in self.iter() {
             key.consensus_encode(s)?;
             value.consensus_encode(s)?;
@@ -366,7 +422,7 @@ impl<D, K, V> ConsensusDecodable<D> for HashMap<K, V>
 {
     #[inline]
     fn consensus_decode(d: &mut D) -> Result<HashMap<K, V>, serialize::Error> {
-        let VarInt(len): VarInt = ConsensusDecodable::consensus_decode(d)?;
+        let len = MinimalVarInt::consensus_decode(d)?.0;
 
         let mut ret = HashMap::with_capacity(len as usize);
         for _ in 0..len {
@@ -433,6 +489,28 @@ mod tests {
         assert_eq!(serialize(&VarInt(0xFFF)).ok(), Some(vec![0xFDu8, 0xFF, 0xF]));
         assert_eq!(serialize(&VarInt(0xF0F0F0F)).ok(), Some(vec![0xFEu8, 0xF, 0xF, 0xF, 0xF]));
         assert_eq!(serialize(&VarInt(0xF0F0F0F0F0E0)).ok(), Some(vec![0xFFu8, 0xE0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0, 0]));
+    }
+
+    #[test]
+    fn deserialize_nonminimal_vec() {
+        assert!(deserialize::<Vec<u8>>(&[0xfd, 0x00, 0x00]).is_err());
+        assert!(deserialize::<Vec<u8>>(&[0xfd, 0xff, 0x00]).is_err());
+        assert!(deserialize::<Vec<u8>>(&[0xfe, 0xff, 0x00, 0x00, 0x00]).is_err());
+        assert!(deserialize::<Vec<u8>>(&[0xfe, 0xff, 0xff, 0x00, 0x00]).is_err());
+        assert!(deserialize::<Vec<u8>>(&[0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]).is_err());
+        assert!(deserialize::<Vec<u8>>(&[0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00]).is_err());
+
+        let mut vec_256 = vec![0; 259];
+        vec_256[0] = 0xfd;
+        vec_256[1] = 0x00;
+        vec_256[2] = 0x01;
+        assert!(deserialize::<Vec<u8>>(&vec_256).is_ok());
+
+        let mut vec_253 = vec![0; 256];
+        vec_253[0] = 0xfd;
+        vec_253[1] = 0xfd;
+        vec_253[2] = 0x00;
+        assert!(deserialize::<Vec<u8>>(&vec_253).is_ok());
     }
 
     #[test]
