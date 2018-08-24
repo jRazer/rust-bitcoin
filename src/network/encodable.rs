@@ -119,9 +119,9 @@ impl<D: SimpleDecoder> ConsensusDecodable<D> for VarInt {
     fn consensus_decode(d: &mut D) -> Result<VarInt, serialize::Error> {
         let n = d.read_u8()?;
         match n {
-            0xFF => d.read_u64().map(|n| VarInt(u64::from_le(n))),
-            0xFE => d.read_u32().map(|n| VarInt(u32::from_le(n) as u64)),
-            0xFD => d.read_u16().map(|n| VarInt(u16::from_le(n) as u64)),
+            0xFF => d.read_u64().map(|n| VarInt(n)),
+            0xFE => d.read_u32().map(|n| VarInt(n as u64)),
+            0xFD => d.read_u16().map(|n| VarInt(n as u64)),
             n => Ok(VarInt(n as u64))
         }
     }
