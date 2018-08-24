@@ -4,6 +4,7 @@ use bitcoin::blockdata::script;
 use bitcoin::network::serialize;
 
 fn do_test(data: &[u8]) {
+    if data.len() > 100 { return }
     let s: Result<script::Script, _> = serialize::deserialize(data);
     if let Ok(script) = s {
         let _: Vec<script::Instruction> = script.iter(false).collect();
@@ -31,6 +32,7 @@ fn do_test(data: &[u8]) {
             }
         }
         assert_eq!(b.into_script(), script);
+        assert_eq!(data, &serialize::serialize(&script).unwrap()[..]);
     }
 }
 
